@@ -7,7 +7,7 @@ Windows PC の空き容量を1回の指示で最大化する Claude Code スキ�
 ## インストール
 
 ```powershell
-git clone https://github.com/<owner>/disk-sweeper.git "$env:USERPROFILE\.claude\skills\disk-sweeper"
+git clone https://github.com/Slvaus/disk-sweeper.git "$env:USERPROFILE\.claude\skills\disk-sweeper"
 ```
 
 **クローンしたら Claude Code を再起動する。** 新しいスキルフォルダは再起動しないと認識されない。
