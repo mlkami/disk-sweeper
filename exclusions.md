@@ -15,6 +15,8 @@
 
 `C:\ProgramData\Package Cache` は残す。Windows SDK はレジストリの `UninstallString` が空のため「設定」アプリから削除できず、`Package Cache\{GUID}\winsdksetup.exe /uninstall` が唯一の削除手段となる。先に消去すると SDK が二度とアンインストールできなくなる。
 
+`C:\Windows\Installer` も残す。インストール済みの MSI / MSP のキャッシュであり、消すと該当アプリの修復・更新・アンインストールが失敗する。
+
 同様に、パッケージマネージャのデータベースやアンインストーラ本体は、一見キャッシュに見えても必ず残す。
 
 ## X3. インストール状態の記録が同居しているフォルダ

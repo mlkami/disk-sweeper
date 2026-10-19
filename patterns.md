@@ -84,5 +84,5 @@ Tauri や Electron 製アプリは、アプリケーション識別子ごとに�
 **分級**: B（管理者権限が必要）
 
 - **休止状態ファイル** — Windows の `hiberfil.sys`。デスクトップ環境では休止状態を使わないケースが多く、`powercfg /h off` で領域を完全解放できる。システム起動への影響はなく `powercfg /h on` で復元可能（副作用は高速スタートアップの無効化のみ）。Unix 系は zram や swap を用いるため該当しにくい。
-- **Windows 標準機能** — `WinSxS` のクリーンアップ（`DISM /Online /Cleanup-Image /StartComponentCleanup`、実行後は過去の更新プログラムへのロールバック不可）、`SoftwareDistribution\Download`、配信最適化キャッシュ。**なお `C:\Windows\Installer` は絶対に削除しないこと。**
+- **Windows 標準機能** — `WinSxS` のクリーンアップ（`DISM /Online /Cleanup-Image /StartComponentCleanup`、実行後は過去の更新プログラムへのロールバック不可）、`SoftwareDistribution\Download`、配信最適化キャッシュ（`C:\Windows\Installer` は対象外。`exclusions.md` の X2）。
 - **Linux 標準機能** — `journalctl --vacuum-size=` によるログ削除、`paccache -rk1` による旧パッケージキャッシュ削除、不要になった Git worktree の整理（`git worktree prune`）。
