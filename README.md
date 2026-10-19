@@ -9,13 +9,13 @@
 **Windows**
 
 ```powershell
-git clone https://github.com/Slvaus/disk-sweeper.git "$env:USERPROFILE\.claude\skills\disk-sweeper"
+git clone https://github.com/mlkami/disk-sweeper.git "$env:USERPROFILE\.claude\skills\disk-sweeper"
 ```
 
 **Linux / macOS**
 
 ```bash
-git clone https://github.com/Slvaus/disk-sweeper.git ~/.claude/skills/disk-sweeper
+git clone https://github.com/mlkami/disk-sweeper.git ~/.claude/skills/disk-sweeper
 ```
 
 **クローン後は Claude Code を再起動する。** 再起動するまで新しいスキルフォルダは認識されない。
