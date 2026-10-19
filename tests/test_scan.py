@@ -92,6 +92,56 @@ class ScanTreeTest(unittest.TestCase):
             self.assertIn("| no |", f.read())  # the dangling link is flagged
 
 
+class AppDataTest(unittest.TestCase):
+    """Small folders directly under app data locations are listed by name; uninstalled extensions are found."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="disk-sweeper-apps-")
+        home = os.path.join(cls.tmp, "home")
+        roaming = os.path.join(home, "AppData", "Roaming")
+        local = os.path.join(home, "AppData", "Local")
+        write(os.path.join(roaming, "tiny-leftover", "settings.json"), 10)
+        write(os.path.join(roaming, "big-app", "cache.bin"), 2 * MB)
+        write(os.path.join(local, "Programs", "some-app", "app.exe"), 10)
+        write(os.path.join(local, "Temp", "x.tmp"), 10)          # system role
+        write(os.path.join(local, "npm-cache", "x.tgz"), 10)     # dev role
+        write(os.path.join(local, "deep", "nested", "x.bin"), 10)
+        ext = os.path.join(home, ".vscode", "extensions")
+        write(os.path.join(ext, "old.ext-1.0.0", "package.json"), MB + 10)
+        write(os.path.join(ext, "current.ext-2.0.0", "package.json"), 10)
+        with open(os.path.join(ext, ".obsolete"), "w", encoding="utf-8") as f:
+            json.dump({"old.ext-1.0.0": True, "gone.ext-0.1.0": True}, f)
+        cls.out = os.path.join(cls.tmp, "out")
+        scan.main(["--out", cls.out, "--root", home, "--min-dir-mb", "1", "--no-system-info", "--home", home])
+        with open(os.path.join(cls.out, "inventory.json"), encoding="utf-8") as f:
+            cls.inv = json.load(f)
+        with open(os.path.join(cls.out, "digest-apps.md"), encoding="utf-8") as f:
+            cls.apps_digest = f.read()
+        with open(os.path.join(cls.out, "digest-dev.md"), encoding="utf-8") as f:
+            cls.dev_digest = f.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_every_app_folder_is_listed_whatever_its_size(self):
+        names = sorted((os.path.basename(d["path"]) for d in self.inv["app_dirs"]), key=str.lower)
+        self.assertEqual(names, ["big-app", "deep", "Programs", "some-app", "tiny-leftover"])
+        self.assertIn("| tiny-leftover | <1 MB |", self.apps_digest)
+        self.assertIn("| some-app | <1 MB |", self.apps_digest)  # AppData\Local\Programs is a location too
+
+    def test_other_roles_and_deeper_folders_are_left_out(self):
+        for name in ("Temp", "npm-cache", "nested"):
+            self.assertNotIn(f"| {name} |", self.apps_digest)
+
+    def test_obsolete_extensions_that_still_exist(self):
+        self.assertEqual([os.path.basename(e["path"]) for e in self.inv["obsolete_extensions"]], ["old.ext-1.0.0"])
+        self.assertEqual(self.inv["obsolete_extensions"][0]["size"], MB + 10)
+        self.assertIn("old.ext-1.0.0", self.dev_digest)
+        self.assertNotIn("current.ext-2.0.0", self.dev_digest)
+
+
 class LinkTargetTest(unittest.TestCase):
     def test_relative_target_is_resolved_from_the_link_folder(self):
         tmp = tempfile.mkdtemp(prefix="disk-sweeper-link-")

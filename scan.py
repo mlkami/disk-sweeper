@@ -74,6 +74,16 @@ ROLE_RULES = [
 ]
 _COMPILED = [(role, re.compile(rx)) for role, rx in ROLE_RULES]
 
+# Folders where apps keep their data. Every folder directly under one is recorded whatever its size:
+# leftovers of uninstalled apps are often small, and the apps role matches them by name.
+APP_ANCHORS = re.compile(
+    r"[a-z]:/(programdata|program files|program files \(x86\))"
+    r"|~/appdata/(roaming|local|locallow|local/programs)"
+    r"|~/(\.cache|\.config|\.local/share)|~/library/(application support|caches|containers)|/opt|/applications")
+
+# Editors that keep uninstalled extensions on disk until their next start, listed in extensions/.obsolete.
+EDITOR_DIRS = (".vscode", ".vscode-insiders", ".vscode-oss", ".vscode-server", ".cursor", ".windsurf")
+
 
 def normalize(path, home):
     p = path[4:] if path.startswith("\\\\?\\") else path
@@ -155,6 +165,7 @@ class Scanner:
         self.markers = []   # (path, name, size, files, mtime_max, manifest)
         self.big_files = [] # (path, size, mtime)
         self.links = []     # (path, target)
+        self.app_dirs = []  # (path, size or None if unreadable, files, mtime_min, mtime_max, anchor)
         self.errors = []    # (path, message)
         self.error_count = 0
         self.seen_inodes = set()
@@ -192,19 +203,23 @@ class Scanner:
         except OSError as e:
             self._error(start, e)
             return 0
-        # frame: [path, iterator, size, files, mtime_min, mtime_max, marker_name, inside_marker]
+        # frame: [path, iterator, size, files, mtime_min, mtime_max, marker_name, inside_marker,
+        #         anchor (set when this is an app data folder), parent_anchor]
         stack = []
 
-        def push(path, marker_name, inside_marker):
+        def push(path, marker_name, inside_marker, parent_anchor):
             try:
                 it = os.scandir(path)
             except OSError as e:
                 self._error(path, e)
+                if parent_anchor:
+                    self.app_dirs.append((display(path), None, 0, None, None, parent_anchor))
                 return
             self.n_dirs += 1
-            stack.append([path, it, 0, 0, None, None, marker_name, inside_marker])
+            anchor = display(path) if APP_ANCHORS.fullmatch(normalize(path, self.home).lower()) else None
+            stack.append([path, it, 0, 0, None, None, marker_name, inside_marker, anchor, parent_anchor])
 
-        push(start, None, False)
+        push(start, None, False, None)
         total = 0
         while stack:
             frame = stack[-1]
@@ -216,9 +231,11 @@ class Scanner:
             if entry is None:
                 frame[1].close()
                 stack.pop()
-                path, _, size, files, mtmin, mtmax, marker_name, inside = frame
+                path, _, size, files, mtmin, mtmax, marker_name, inside, _, parent_anchor = frame
                 if size >= self.min_dir:
                     self.dirs.append((display(path), size, files, mtmin, mtmax))
+                if parent_anchor:
+                    self.app_dirs.append((display(path), size, files, mtmin, mtmax, parent_anchor))
                 if marker_name and not inside and size >= 1024 * 1024:
                     parent = os.path.dirname(path.rstrip("\\/"))
                     manifest = ",".join(m for m in MANIFESTS if os.path.exists(os.path.join(parent, m)))
@@ -253,7 +270,7 @@ class Scanner:
                 self._progress(entry.path)
                 name = entry.name
                 inside = frame[7] or bool(frame[6])
-                push(entry.path, name if name in MARKERS else None, inside)
+                push(entry.path, name if name in MARKERS else None, inside, frame[8])
                 continue
             size = st.st_size
             if not IS_WINDOWS and st.st_nlink > 1:
@@ -347,7 +364,30 @@ def running_processes():
     return procs
 
 
+def obsolete_extensions(home):
+    """Extension folders an editor has marked as uninstalled. The editor deletes them on its next start."""
+    found = []
+    for editor in EDITOR_DIRS:
+        ext_dir = os.path.join(home, editor, "extensions")
+        try:
+            with open(os.path.join(ext_dir, ".obsolete"), encoding="utf-8") as f:
+                names = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(names, dict):
+            names = [name for name, flag in names.items() if flag]
+        for name in sorted(names):
+            path = os.path.join(ext_dir, name)
+            if os.path.isdir(path) and not os.path.islink(path):
+                found.append((path, Scanner(1 << 62, 1 << 62, "").scan_root(path)))
+    return found
+
+
 def fmt_size(n):
+    if n is None:
+        return "?"
+    if n < 1024 ** 2:
+        return "<1 MB"
     return f"{n / 1024 ** 3:.2f} GB" if n >= 1024 ** 3 else f"{n / 1024 ** 2:.0f} MB"
 
 
@@ -355,10 +395,12 @@ def fmt_date(t):
     return datetime.fromtimestamp(t).strftime("%Y-%m-%d") if t else "-"
 
 
-def write_outputs(out, sc, drives, elapsed, max_rows):
+def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=()):
     home = sc.home
     role_of = lambda p: classify(normalize(p, home))
     dirs = [d + (role_of(d[0]),) for d in sc.dirs]
+    # Only the apps role matches app data by name; caches of dev tools, games and Temp belong to other roles.
+    app_dirs = [d for d in sc.app_dirs if role_of(d[0]) == "apps"]
     files = [f + (role_of(f[0]),) for f in sc.big_files]
     links = [link + (role_of(link[0]),) for link in sc.links]
     markers = sorted(sc.markers, key=lambda m: -m[2])
@@ -389,6 +431,24 @@ def write_outputs(out, sc, drives, elapsed, max_rows):
             for path, name, size, n, mtmax, manifest in markers[:max_rows]:
                 lines.append(f"| `{path}` | {name} | {fmt_size(size)} | {n:,} | {fmt_date(mtmax)} "
                              f"| {manifest or '-'} | {role_of(path)} |")
+            lines += ["", f"## Uninstalled editor extensions still on disk ({len(obsolete)}, "
+                          f"{fmt_size(sum(s for _, s in obsolete)) if obsolete else '0 MB'})", "",
+                      "Listed in the editor's `extensions/.obsolete`: the extension was uninstalled, and the editor "
+                      "deletes the folder on its next start anyway.", "", "| path | size |", "|---|---|"]
+            lines += [f"| `{path}` | {fmt_size(size)} |" for path, size in obsolete]
+        if role == "apps":
+            by_anchor = {}
+            for d in app_dirs:
+                by_anchor.setdefault(d[5], []).append(d)
+            lines += ["", f"## Every folder directly under app data locations ({len(app_dirs)})", "",
+                      "Listed whatever their size, so leftovers of uninstalled apps can be matched by name against "
+                      "`apps.json`. Folders of other roles (dev tool caches, games, Temp) are left out. "
+                      "`?` means the folder could not be read."]
+            for anchor in sorted(by_anchor, key=str.lower):
+                rows_a = sorted(by_anchor[anchor], key=lambda d: d[0].lower())
+                lines += ["", f"### `{anchor}` ({len(rows_a)})", "", "| name | size | newest |", "|---|---|---|"]
+                for path, size, _, _, mtmax, _ in rows_a:
+                    lines.append(f"| {os.path.basename(path)} | {fmt_size(size)} | {fmt_date(mtmax)} |")
         rfiles = sorted((f for f in files if f[3] == role), key=lambda f: -f[1])
         lines += ["", f"## Large files ({len(rfiles)})", "", "| path | size | modified |", "|---|---|---|"]
         for path, size, mt, _ in rfiles[:max_rows]:
@@ -432,6 +492,9 @@ def write_outputs(out, sc, drives, elapsed, max_rows):
                     for p, k, s, n, b, m in markers],
         "big_files": [{"path": p, "size": s, "modified": t, "role": r} for p, s, t, r in files],
         "links": [{"path": p, "target": t, "role": r} for p, t, r in links],
+        "app_dirs": [{"path": p, "size": s, "files": n, "oldest": a, "newest": b, "anchor": an}
+                     for p, s, n, a, b, an in app_dirs],
+        "obsolete_extensions": [{"path": p, "size": s} for p, s in obsolete],
         "errors": [{"path": p, "error": e} for p, e in sc.errors],
     }
     with open(os.path.join(out, "inventory.json"), "w", encoding="utf-8") as f:
@@ -450,7 +513,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     os.makedirs(args.out, exist_ok=True)
-    home = (args.home or os.path.expanduser("~")).replace("\\", "/").rstrip("/")
+    raw_home = args.home or os.path.expanduser("~")
+    home = raw_home.replace("\\", "/").rstrip("/")
     home = home.lower() if IS_WINDOWS else home
     sc = Scanner(int(args.min_dir_mb * 1024 ** 2), int(args.min_file_mb * 1024 ** 2), home)
     started = time.time()
@@ -472,7 +536,7 @@ def main(argv=None):
         drives.append((root, total, free, scanned))
         print(f"[scan] {root} done in {time.time() - t0:.0f} s", file=sys.stderr, flush=True)
     elapsed = time.time() - started
-    write_outputs(args.out, sc, drives, elapsed, args.max_rows)
+    write_outputs(args.out, sc, drives, elapsed, args.max_rows, obsolete_extensions(raw_home))
     if not args.no_system_info:
         with open(os.path.join(args.out, "apps.json"), "w", encoding="utf-8") as f:
             json.dump(installed_apps(), f, ensure_ascii=False, indent=1)
