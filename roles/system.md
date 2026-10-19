@@ -1,0 +1,22 @@
+# 担当: system（OS と一時ファイル）
+
+## 範囲
+
+`digest-system.md` の全部。主に次のもの。
+
+- Windows: `C:\Windows`、`Windows.old`、各ドライブの `$RECYCLE.BIN`、`hiberfil.sys`、`pagefile.sys`、`System Volume Information`、`AppData\Local\Temp`、`CrashDumps`、WER（エラー報告）
+- Linux / macOS: `/var`（ログ、パッケージのキャッシュ）、`/tmp`、`/boot`、ゴミ箱（`~/.local/share/Trash`、各マウントの `.Trash-<uid>`、`~/.Trash`）
+
+## 見るパターンと除外
+
+- パターン: P1（ゴミ箱）、P9（システム予約と OS 標準の掃除対象）
+- 除外: X2（`C:\Windows\Installer` など）、X6（`LastGood`）
+
+## 判定のこつ
+
+- **ゴミ箱は全ドライブ分を挙げる（P1）。** ドライブごとに、件数と、大きいファイルの名前をいくつか書く。中身はユーザーが捨てたものなので A だが、名前を見せて確かめてもらう。
+- `Windows.old` は、OS のロールバック期限に関わるので B。期限が分からなければ「確かめられなかったもの」にも書く。ユーザーから期限を伝えられていれば、それに従う。
+- `WinSxS` は、ハードリンクのせいで実際より大きく見える（`summary.md` の注記）。減らすなら DISM のクリーンアップ（B、管理者、更新プログラムのロールバックができなくなる）。
+- Temp は、日付の古いものだけを候補にする。使用中のファイルはロックされていて消せない（X4）。
+- `pagefile.sys` は C。`hiberfil.sys` は P9（B）。
+- digest の末尾の「読めなかったフォルダ」に、管理者でないと測れない大きな場所があれば、「確かめられなかったもの」に書く。
