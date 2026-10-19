@@ -92,6 +92,19 @@ class ScanTreeTest(unittest.TestCase):
             self.assertIn("| no |", f.read())  # the dangling link is flagged
 
 
+class LinkTargetTest(unittest.TestCase):
+    def test_relative_target_is_resolved_from_the_link_folder(self):
+        tmp = tempfile.mkdtemp(prefix="disk-sweeper-link-")
+        try:
+            write(os.path.join(tmp, "blobs", "abc"), 1)
+            link = os.path.join(tmp, "snapshots", "rev", "model.pt")  # the link itself need not exist here
+            self.assertTrue(scan.link_target_exists(link, os.path.join("..", "..", "blobs", "abc")))
+            self.assertFalse(scan.link_target_exists(link, os.path.join("..", "..", "blobs", "missing")))
+            self.assertFalse(scan.link_target_exists(link, "?"))
+        finally:
+            shutil.rmtree(tmp)
+
+
 class ClassifyTest(unittest.TestCase):
     CASES = {
         "c:/windows/winsxs": "system",

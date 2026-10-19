@@ -102,6 +102,15 @@ def as_list(data):
     return [data] if isinstance(data, dict) else list(data or [])
 
 
+def link_target_exists(link_path, target):
+    """A relative target is relative to the folder that holds the link, not to the current directory."""
+    if not target or target == "?":
+        return False
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(link_path), target)
+    return os.path.exists(target)
+
+
 def default_roots():
     if IS_WINDOWS:
         import ctypes
@@ -390,7 +399,7 @@ def write_outputs(out, sc, drives, elapsed, max_rows):
                       "A target that no longer exists is worth reporting.", "", "| link | target | target exists |",
                       "|---|---|---|"]
             for path, target, _ in rlinks[:max_rows]:
-                exists = "yes" if target != "?" and os.path.exists(target) else "no"
+                exists = "yes" if link_target_exists(path, target) else "no"
                 lines.append(f"| `{path}` | `{target}` | {exists} |")
         if role == "system":
             lines += ["", f"## Unreadable directories ({sc.error_count} total, first {len(sc.errors)})", ""]
