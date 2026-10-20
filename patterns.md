@@ -103,3 +103,18 @@ Tauri や Electron 製アプリは、アプリケーション識別子ごとに�
 **分級**: 旧版・機器がないものは B（管理者権限が要る）、ロールバック用は B で影響を明記、インストーラーの展開残りは A
 **消し方**: `pnputil /delete-driver oemNN.inf` を1件ずつ（管理者）。`/force` と `/uninstall` は付けない（`exclusions.md` の X8）。使用中のものは pnputil が削除を拒否する。
 **実績**: 旧版 2件・1 MB 未満（NVIDIA の音声ドライバー、OS 更新の直後で溜まっていなかった）／ 機器がないもの 172 MB（Intel `lms.inf`）
+
+## P11. 縮まない仮想ディスク
+
+WSL 2 のディストリビューションと Docker Desktop は、Linux 側のファイルを仮想ディスク（`.vhdx`）に入れる。中のファイルを消しても、`.vhdx` は一番大きかったときの大きさのまま縮まない。縮める（compact）と、使っていない分が戻る。
+
+**判定**: `digest-dev.md` の「Virtual disks」の表を使う。WSL の登録（レジストリの `Lxss`）、Docker Desktop の既定の置き場（`%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx`、古い版は `...\wsl\data\ext4.vhdx`）、走査で見つかったほかの `.vhdx` が載っている。
+
+- 戻る量は、ファイルの大きさから中の使用量を引いたもの。起動中（`running` が `yes`）のディストリビューションなら、`wsl -d <名前> -- df -B1 /` で中の使用量を測ってよい（読み取りのみ）。起動していないものを、測るために起動しない。その場合、戻る量は「縮めるまで分からない」とする。
+- Docker は、起動中なら `docker system df` で、消せるイメージなどの量が分かる。`docker system prune` で中を減らしてから縮めると戻る量が増える。ただし使っていないイメージやコンテナが消えるので、縮めるのとは別の B 候補にする。
+- `sparse` が `yes` のものは縮めない（`exclusions.md` の X9）。
+- ディストリビューション名が `-` のもの（Hyper-V などの仮想マシンのディスク）は、仮想マシンを止めないと縮められない。持ち主が分からなければ D。
+
+**分級**: B（縮める間、WSL と Docker が止まる。管理者権限が要る）。ファイルは消さない。
+**縮め方**: Docker Desktop を終了する → `wsl --shutdown` → `wsl --list --running --quiet` が空であることを確かめる → 管理者で diskpart（`select vdisk file="<パス>"`、`attach vdisk readonly`、`compact vdisk`、`detach vdisk`）。Hyper-V のモジュールがあれば `Optimize-VHD -Path <パス> -Mode Full` でもよい（Home エディションにはない）。
+**実績**: まだない（この節を書いた PC には WSL がなく、縮める手順を実機で確かめていない）。縮み方は環境によって大きく違い、数百 GB 戻った例も、まったく縮まなかった例も報告されている。
