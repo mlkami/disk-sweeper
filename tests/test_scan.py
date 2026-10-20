@@ -159,6 +159,91 @@ class ListDrivesTest(unittest.TestCase):
             scan.main(["--root", "."])
 
 
+ENUM_DRIVERS = """Microsoft PnP Utility
+
+Published Name:     oem4.inf
+Original Name:      nvvad.inf
+Provider Name:      NVIDIA
+Class Name:         MEDIA
+Class GUID:         {4d36e96c-e325-11ce-bfc1-08002be10318}
+Driver Version:     08/04/2026 4.92.0.0
+Signer Name:        Microsoft Windows Hardware Compatibility Publisher
+
+Published Name:     oem95.inf
+Original Name:      prnms001.inf
+Provider Name:      Microsoft
+Class Name:         Printer
+Class GUID:         {4d36e979-e325-11ce-bfc1-08002be10318}
+Class Version:      4.0
+Driver Version:     06/21/2006 10.0.26100.1
+Signer Name:        Microsoft Windows
+
+公開名:             oem18.inf
+元の名前:           nvvad.inf
+プロバイダー名:     NVIDIA
+クラス名:           MEDIA
+クラス GUID:        {4d36e96c-e325-11ce-bfc1-08002be10318}
+ドライバー バージョン: 2025/05/13 4.65.0.12
+署名者名:           Microsoft Windows Hardware Compatibility Publisher
+"""
+
+ENUM_DEVICES = """Microsoft PnP Utility
+
+Instance ID:                HDAUDIO\\FUNC_01&VEN_10DE
+Device Description:         NVIDIA Virtual Audio Device
+Status:                     Started
+Driver Name:                oem4.inf
+
+Instance ID:                USB\\VID_046D
+Device Description:         Old wheel
+Status:                     Disconnected
+Driver Name:                OEM90.inf
+Extension Driver Names:     oem55.inf
+"""
+
+
+class DriverTest(unittest.TestCase):
+    def test_fields_are_told_apart_by_value_not_label(self):
+        pk = {p["published"]: p for p in scan.parse_enum_drivers(ENUM_DRIVERS)}
+        self.assertEqual(set(pk), {"oem4.inf", "oem95.inf", "oem18.inf"})
+        self.assertEqual((pk["oem4.inf"]["original"], pk["oem4.inf"]["provider"], pk["oem4.inf"]["class"]),
+                         ("nvvad.inf", "NVIDIA", "MEDIA"))
+        self.assertEqual(pk["oem95.inf"]["version"], "10.0.26100.1")  # the extra Class Version line is skipped
+        self.assertEqual((pk["oem18.inf"]["date"], pk["oem18.inf"]["version"]), ("2025/05/13", "4.65.0.12"))
+
+    def test_xml_output(self):
+        data = ('<?xml version="1.0" encoding="utf-8"?>\n<PnpUtil><Driver DriverName="oem4.inf">'
+                "<OriginalName>nvvad.inf</OriginalName><ProviderName>NVIDIA</ProviderName><ClassName>MEDIA</ClassName>"
+                "<DriverVersion>08/04/2026 4.92.0.0</DriverVersion></Driver></PnpUtil>").encode("utf-8")
+        self.assertEqual(scan.parse_enum_drivers_xml(data), [
+            {"published": "oem4.inf", "original": "nvvad.inf", "provider": "NVIDIA", "class": "MEDIA",
+             "date": "08/04/2026", "version": "4.92.0.0"}])
+
+    def test_devices_bind_drivers_and_extensions_even_when_disconnected(self):
+        self.assertEqual(scan.bound_infs(ENUM_DEVICES), {"oem4.inf", "oem90.inf", "oem55.inf"})
+
+    def test_folder_is_matched_by_the_copy_of_the_inf(self):
+        tmp = tempfile.mkdtemp(prefix="disk-sweeper-test-")
+        try:
+            inf, repo = os.path.join(tmp, "INF"), os.path.join(tmp, "FileRepository")
+            for name, body in (("nvvad.inf_amd64_aaaa", b"new"), ("nvvad.inf_amd64_bbbb", b"old")):
+                write(os.path.join(repo, name, "nvvad.inf"), 0)
+                with open(os.path.join(repo, name, "nvvad.inf"), "wb") as f:
+                    f.write(body)
+                write(os.path.join(repo, name, "driver.sys"), 2 * MB)
+            os.makedirs(inf)
+            with open(os.path.join(inf, "oem18.inf"), "wb") as f:
+                f.write(b"old")
+            pk = scan.match_driver_folders(
+                [{"published": "oem18.inf", "original": "nvvad.inf"}, {"published": "oem7.inf", "original": "x.inf"}],
+                inf, repo)
+            self.assertEqual(os.path.basename(pk[0]["folder"]), "nvvad.inf_amd64_bbbb")
+            self.assertEqual(pk[0]["size"], 2 * MB + 3)
+            self.assertIsNone(pk[1]["folder"])
+        finally:
+            shutil.rmtree(tmp)
+
+
 class LinkTargetTest(unittest.TestCase):
     def test_relative_target_is_resolved_from_the_link_folder(self):
         tmp = tempfile.mkdtemp(prefix="disk-sweeper-link-")
@@ -178,6 +263,9 @@ class ClassifyTest(unittest.TestCase):
         "c:/windows.old": "system",
         "d:/$recycle.bin": "system",
         "c:/pagefile.sys": "system",
+        "c:/amd/amd-software-installer": "system",
+        "c:/nvidia/displaydriver": "system",
+        "/usr/lib/modules/6.1.0-old": "system",
         "~/appdata/local/temp/x": "system",
         "/var/cache/pacman/pkg": "system",
         "~/.local/share/trash/files": "system",

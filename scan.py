@@ -13,6 +13,7 @@ Writes to DIR:
     inventory.json      everything recorded, for spot checks
     apps.json           installed applications (for orphan detection)
     processes.json      running processes (for lock checks)
+    drivers.json        third-party driver packages and whether a device uses them (Windows)
 """
 import argparse
 import json
@@ -22,6 +23,7 @@ import stat
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 IS_WINDOWS = os.name == "nt"
@@ -49,6 +51,8 @@ ROLE_RULES = [
     ("system", r"^[a-z]:/(windows|windows\.old|\$recycle\.bin|system volume information|recovery"
                r"|\$windows\.~bt|\$windows\.~ws|\$sysreset|perflogs)(/|$)"),
     ("system", r"^[a-z]:/(hiberfil|pagefile|swapfile)\.sys$"),
+    ("system", r"^[a-z]:/(amd|nvidia|intel)(/|$)"),  # driver installers unpack here
+    ("system", r"^/(usr/)?lib/modules(/|$)"),
     ("system", r"^~/appdata/local/(temp|crashdumps)(/|$)"),
     ("system", r"^[a-z]:/programdata/microsoft/windows/wer(/|$)"),
     ("system", r"^~/\.local/share/trash(/|$)|/\.trash(-\d+)?(/|$)|^~/\.trash(/|$)|/\.trashes(/|$)"),
@@ -415,6 +419,105 @@ def obsolete_extensions(home):
     return found
 
 
+# pnputil labels can be localized, so fields are told apart by the shape of their values, not by labels.
+_OEM_INF = re.compile(r"\boem\d+\.inf\b", re.IGNORECASE)
+_GUID = re.compile(r"^\{[0-9a-f-]{36}\}$", re.IGNORECASE)
+_DATE_VERSION = re.compile(r"^(\S+)\s+(\d+(?:\.\d+)+)$")
+
+
+def parse_enum_drivers(text):
+    """Blocks of `pnputil /enum-drivers`: published name, original name, provider, class, then GUID and version."""
+    packages = []
+    for block in re.split(r"\r?\n\s*\r?\n", text):
+        values = [m.group(1) for m in re.finditer(r"^\S[^:：\r\n]*[:：][ \t]*(.*?)[ \t\r]*$", block, re.MULTILINE)]
+        first = next((i for i, v in enumerate(values) if _OEM_INF.fullmatch(v)), None)
+        if first is None or len(values) < first + 4:
+            continue
+        rest = values[first + 4:]
+        guid = next((i for i, v in enumerate(rest) if _GUID.match(v)), -1)
+        ver = next(filter(None, (_DATE_VERSION.match(v) for v in rest[guid + 1:])), None)
+        packages.append({
+            "published": values[first].lower(), "original": values[first + 1], "provider": values[first + 2],
+            "class": values[first + 3], "date": ver.group(1) if ver else "", "version": ver.group(2) if ver else "",
+        })
+    return packages
+
+
+def parse_enum_drivers_xml(data):
+    """`pnputil /enum-drivers /format xml`, which newer Windows builds have. Not localized."""
+    packages = []
+    for d in ET.fromstring(data).iter("Driver"):
+        ver = _DATE_VERSION.match((d.findtext("DriverVersion") or "").strip())
+        packages.append({
+            "published": (d.get("DriverName") or "").lower(), "original": d.findtext("OriginalName") or "",
+            "provider": d.findtext("ProviderName") or "", "class": d.findtext("ClassName") or "",
+            "date": ver.group(1) if ver else "", "version": ver.group(2) if ver else "",
+        })
+    return [p for p in packages if _OEM_INF.fullmatch(p["published"])]
+
+
+def bound_infs(text):
+    """Published names that `pnputil /enum-devices` assigns to a device, connected or not, as driver or extension."""
+    return {m.group(0).lower() for m in _OEM_INF.finditer(text)}
+
+
+def match_driver_folders(packages, inf_dir, repo_dir):
+    """Find each package's DriverStore folder: Windows\\INF\\oemN.inf is a byte copy of the original INF there."""
+    try:
+        folders = os.listdir(repo_dir)
+    except OSError:
+        folders = []
+    for p in packages:
+        p["folder"], p["size"] = None, None
+        try:
+            with open(os.path.join(inf_dir, p["published"]), "rb") as f:
+                copy = f.read()
+        except OSError:
+            continue
+        prefix = p["original"].lower() + "_"
+        for name in folders:
+            if not name.lower().startswith(prefix):
+                continue
+            folder = os.path.join(repo_dir, name)
+            try:
+                with open(os.path.join(folder, p["original"]), "rb") as f:
+                    if f.read() != copy:
+                        continue
+            except OSError:
+                continue
+            p["folder"], p["size"] = folder, Scanner(1 << 62, 1 << 62, "").scan_root(folder)
+            break
+    return packages
+
+
+def driver_packages():
+    """Third-party driver packages in the Windows driver store, with the folder each one takes."""
+    if not IS_WINDOWS:
+        return []
+    def pnputil(*args):
+        r = subprocess.run(["pnputil", *args], capture_output=True, timeout=120)
+        if r.returncode != 0:
+            raise subprocess.SubprocessError(f"pnputil {' '.join(args)} exited with {r.returncode}")
+        return r.stdout
+    try:
+        packages = parse_enum_drivers_xml(pnputil("/enum-drivers", "/format", "xml"))
+    except (OSError, subprocess.SubprocessError, ET.ParseError):  # no /format on this build
+        try:
+            packages = parse_enum_drivers(pnputil("/enum-drivers").decode("mbcs", errors="replace"))
+        except (OSError, subprocess.SubprocessError):
+            return []
+    try:
+        bound = bound_infs(pnputil("/enum-devices").decode("mbcs", errors="replace"))  # Windows 10 2004 and later
+    except (OSError, subprocess.SubprocessError):
+        bound = None
+    windir = os.environ.get("SystemRoot", r"C:\Windows")
+    match_driver_folders(packages, os.path.join(windir, "INF"),
+                         os.path.join(windir, "System32", "DriverStore", "FileRepository"))
+    for p in packages:
+        p["in_use"] = "unknown" if bound is None else ("yes" if p["published"] in bound else "no")
+    return packages
+
+
 def fmt_size(n):
     if n is None:
         return "?"
@@ -427,7 +530,14 @@ def fmt_date(t):
     return datetime.fromtimestamp(t).strftime("%Y-%m-%d") if t else "-"
 
 
-def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=()):
+def version_key(p):
+    try:
+        return tuple(int(x) for x in p["version"].split("."))
+    except ValueError:
+        return ()
+
+
+def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=(), drivers=()):
     home = sc.home
     role_of = lambda p: classify(normalize(p, home))
     dirs = [d + (role_of(d[0]),) for d in sc.dirs]
@@ -493,6 +603,22 @@ def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=()):
             for path, target, _ in rlinks[:max_rows]:
                 exists = "yes" if link_target_exists(path, target) else "no"
                 lines.append(f"| `{path}` | `{target}` | {exists} |")
+        if role == "system" and drivers:
+            rows_d = sorted(drivers, key=lambda p: (p["provider"].lower(), p["class"].lower(), p["original"].lower(),
+                                                    tuple(-x for x in version_key(p))))
+            lines += ["", f"## Driver packages in the driver store ({len(drivers)}, "
+                          f"{fmt_size(sum(p['size'] or 0 for p in drivers))})", "",
+                      "Third-party packages from `pnputil /enum-drivers` (Windows' own drivers are not listed). "
+                      "`in use` is `yes` when a device, connected or not, uses the package as its driver or "
+                      "extension. Printers are used through the print spooler, not as devices, so `no` tells "
+                      "nothing for them. `?` means the folder could not be matched.", "",
+                      "| published | original | provider | class | version | date | size | in use | folder |",
+                      "|---|---|---|---|---|---|---|---|---|"]
+            for p in rows_d:
+                lines.append(f"| {p['published']} | {p['original']} | {p['provider']} | {p['class']} "
+                             f"| {p['version'] or '-'} | {p['date'] or '-'} "
+                             f"| {fmt_size(p['size']) if p['size'] is not None else '?'} | {p['in_use']} "
+                             f"| {'`' + os.path.basename(p['folder']) + '`' if p['folder'] else '?'} |")
         if role == "system":
             lines += ["", f"## Unreadable directories ({sc.error_count} total, first {len(sc.errors)})", ""]
             lines += [f"- `{p}`: {msg}" for p, msg in sc.errors]
@@ -566,8 +692,12 @@ def main(argv=None):
         drives.append((root, total, free, scanned))
         print(f"[scan] {root} done in {time.time() - t0:.0f} s", file=sys.stderr, flush=True)
     elapsed = time.time() - started
-    write_outputs(args.out, sc, drives, elapsed, args.max_rows, obsolete_extensions(raw_home))
+    drivers = [] if args.no_system_info else driver_packages()
+    write_outputs(args.out, sc, drives, elapsed, args.max_rows, obsolete_extensions(raw_home), drivers)
     if not args.no_system_info:
+        if IS_WINDOWS:
+            with open(os.path.join(args.out, "drivers.json"), "w", encoding="utf-8") as f:
+                json.dump(drivers, f, ensure_ascii=False, indent=1)
         with open(os.path.join(args.out, "apps.json"), "w", encoding="utf-8") as f:
             json.dump(installed_apps(), f, ensure_ascii=False, indent=1)
         with open(os.path.join(args.out, "processes.json"), "w", encoding="utf-8") as f:
