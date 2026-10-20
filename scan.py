@@ -5,7 +5,7 @@ Read-only. Standard library only (Python 3.8+). Never follows symlinks or juncti
 
 usage:
     python -I scan.py --out DIR [--root PATH ...] [--min-dir-mb 100] [--min-file-mb 150] [--max-rows 200]
-    python -I scan.py --list-drives     drives and free space only, no scan
+    python -I scan.py --list-drives     drives, free space and virtual disks only, no scan
 
 Writes to DIR:
     summary.md          drives, elapsed time, totals per role, scan errors
@@ -61,7 +61,8 @@ ROLE_RULES = [
             r"|\.ollama|\.lmstudio|\.docker|\.android|\.bun|\.deno|\.local/share/pnpm)(/|$)"),
     ("dev", r"^~/\.cache/(pip|uv|pnpm|yarn|go-build|bazel|puppeteer|ms-playwright|huggingface|torch|node-gyp"
             r"|electron|electron-builder|pre-commit|paru|yay)(/|$)"),
-    ("dev", r"^~/appdata/local/(pip|uv|ms-playwright|go-build|npm-cache|pnpm|pnpm-cache|yarn|docker|electron"
+    ("dev", r"\.vhdx?$"),  # WSL, Docker and other virtual disks, wherever they are
+    ("dev", r"^~/appdata/local/(pip|uv|ms-playwright|go-build|npm-cache|pnpm|pnpm-cache|yarn|docker|wsl|electron"
             r"|electron-builder|node-gyp|programs/python|programs/microsoft vs code|nvidia/dxcache)(/|$)"),
     ("dev", r"^~/appdata/roaming/(npm|npm-cache|uv|nvm)(/|$)"),
     ("dev", r"^[a-z]:/program files( \(x86\))?/(windows kits|microsoft visual studio|microsoft sdks|dotnet|android"
@@ -182,14 +183,24 @@ def volume_label(root):
     return buf.value if ok else ""
 
 
-def list_drives(roots):
-    """Drives and free space without scanning, for asking the user which drives to sweep."""
+def list_drives(roots, vdisks=()):
+    """Drives and free space without scanning, for asking the user what to sweep."""
     lines = ["| drive | label | total | free | free % |", "|---|---|---|---|---|"]
     for root in roots:
         total, free = disk_usage(root)
         pct = f"{100 * free / total:.0f}%" if total else "-"
         lines.append(f"| `{root}` | {volume_label(root) or '-'} | {fmt_size(total)} | {fmt_size(free)} | {pct} |")
+    if vdisks:
+        lines += ["", "Virtual disks (WSL, Docker):", ""] + vdisk_table(vdisks)
     return "\n".join(lines)
+
+
+def vdisk_table(vdisks):
+    lines = ["| distro | path | size | sparse | running |", "|---|---|---|---|---|"]
+    for d in vdisks:
+        lines.append(f"| {d['distro']} | `{d['path']}` | {fmt_size(d['size'])} | {'yes' if d['sparse'] else 'no'} "
+                     f"| {d['running']} |")
+    return lines
 
 
 class Scanner:
@@ -490,6 +501,66 @@ def match_driver_folders(packages, inf_dir, repo_dir):
     return packages
 
 
+FILE_ATTRIBUTE_SPARSE_FILE = 0x200
+
+
+def parse_wsl_names(data):
+    """`wsl --list --quiet` prints UTF-16 unless WSL_UTF8 is set."""
+    text = data.decode("utf-16-le" if b"\x00" in data else "utf-8", errors="replace")
+    return {line.strip().lstrip("﻿") for line in text.splitlines() if line.strip()}
+
+
+def describe_disks(disks, running):
+    """(distro, path) pairs that exist, once per file."""
+    seen, found = set(), []
+    for distro, path in disks:
+        key = os.path.normcase(os.path.abspath(path))
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"distro": distro, "path": path, "size": st.st_size, "modified": st.st_mtime,
+                      "sparse": bool(getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_SPARSE_FILE),
+                      "running": "yes" if distro in running else "no"})
+    return found
+
+
+def virtual_disks(extra=()):
+    """WSL 2 and Docker Desktop disks. A .vhdx keeps its largest size until it is compacted."""
+    if not IS_WINDOWS:
+        return []
+    import winreg
+    disks = []
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Lxss")
+        for i in range(winreg.QueryInfoKey(k)[0]):
+            sk = winreg.OpenKey(k, winreg.EnumKey(k, i))
+            values = {}
+            for name in ("DistributionName", "BasePath", "VhdFileName", "Version"):
+                try:
+                    values[name] = winreg.QueryValueEx(sk, name)[0]
+                except OSError:
+                    pass
+            if values.get("Version", 2) == 2 and values.get("BasePath"):  # WSL 1 keeps its files on NTFS
+                disks.append((values.get("DistributionName", "?"),
+                              os.path.join(display(values["BasePath"]), values.get("VhdFileName", "ext4.vhdx"))))
+    except OSError:
+        pass
+    local = os.environ.get("LOCALAPPDATA", "")
+    for rel in (r"Docker\wsl\disk\docker_data.vhdx", r"Docker\wsl\data\ext4.vhdx"):
+        disks.append(("docker-desktop", os.path.join(local, rel)))
+    disks += [("-", p) for p in extra]
+    try:
+        r = subprocess.run(["wsl", "--list", "--running", "--quiet"], capture_output=True, timeout=60)
+        running = parse_wsl_names(r.stdout) if r.returncode == 0 else set()
+    except (OSError, subprocess.SubprocessError):
+        running = set()
+    return describe_disks(disks, running)
+
+
 def driver_packages():
     """Third-party driver packages in the Windows driver store, with the folder each one takes."""
     if not IS_WINDOWS:
@@ -537,7 +608,7 @@ def version_key(p):
         return ()
 
 
-def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=(), drivers=()):
+def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=(), drivers=(), vdisks=()):
     home = sc.home
     role_of = lambda p: classify(normalize(p, home))
     dirs = [d + (role_of(d[0]),) for d in sc.dirs]
@@ -578,6 +649,11 @@ def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=(), drivers=()):
                       "Listed in the editor's `extensions/.obsolete`: the extension was uninstalled, and the editor "
                       "deletes the folder on its next start anyway.", "", "| path | size |", "|---|---|"]
             lines += [f"| `{path}` | {fmt_size(size)} |" for path, size in obsolete]
+            lines += ["", f"## Virtual disks ({len(vdisks)}, {fmt_size(sum(d['size'] for d in vdisks)) if vdisks else '0 MB'})",
+                      "", "WSL 2 distributions (from the registry), Docker Desktop, and other `.vhdx` / `.vhd` files. "
+                      "A virtual disk keeps its largest size after files inside it are deleted; compacting gives "
+                      "the unused part back. Used space inside is not measured: that would start the distribution.",
+                      ""] + vdisk_table(vdisks)
         if role == "apps":
             by_anchor = {}
             for d in app_dirs:
@@ -653,6 +729,7 @@ def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=(), drivers=()):
         "app_dirs": [{"path": p, "size": s, "files": n, "oldest": a, "newest": b, "anchor": an}
                      for p, s, n, a, b, an in app_dirs],
         "obsolete_extensions": [{"path": p, "size": s} for p, s in obsolete],
+        "virtual_disks": list(vdisks),
         "errors": [{"path": p, "error": e} for p, e in sc.errors],
     }
     with open(os.path.join(out, "inventory.json"), "w", encoding="utf-8") as f:
@@ -672,7 +749,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.list_drives:
         # Volume labels can be non-ASCII; the locale code page (cp932 and so on) garbles them for the agent.
-        sys.stdout.buffer.write((list_drives(args.root or default_roots()) + "\n").encode("utf-8"))
+        table = list_drives(args.root or default_roots(), [] if args.no_system_info else virtual_disks())
+        sys.stdout.buffer.write((table + "\n").encode("utf-8"))
         return 0
     if not args.out:
         ap.error("--out is required")
@@ -693,7 +771,9 @@ def main(argv=None):
         print(f"[scan] {root} done in {time.time() - t0:.0f} s", file=sys.stderr, flush=True)
     elapsed = time.time() - started
     drivers = [] if args.no_system_info else driver_packages()
-    write_outputs(args.out, sc, drives, elapsed, args.max_rows, obsolete_extensions(raw_home), drivers)
+    vdisks = [] if args.no_system_info else virtual_disks(
+        [f[0] for f in sc.big_files if f[0].lower().endswith((".vhdx", ".vhd"))])
+    write_outputs(args.out, sc, drives, elapsed, args.max_rows, obsolete_extensions(raw_home), drivers, vdisks)
     if not args.no_system_info:
         if IS_WINDOWS:
             with open(os.path.join(args.out, "drivers.json"), "w", encoding="utf-8") as f:

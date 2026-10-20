@@ -244,6 +244,38 @@ class DriverTest(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+class VirtualDiskTest(unittest.TestCase):
+    def test_wsl_names_in_utf16_and_utf8(self):
+        self.assertEqual(scan.parse_wsl_names("Ubuntu\r\ndocker-desktop\r\n".encode("utf-16-le")),
+                         {"Ubuntu", "docker-desktop"})
+        self.assertEqual(scan.parse_wsl_names(b"Ubuntu\n"), {"Ubuntu"})
+        self.assertEqual(scan.parse_wsl_names(b""), set())
+
+    def test_existing_disks_once_each(self):
+        tmp = tempfile.mkdtemp(prefix="disk-sweeper-test-")
+        try:
+            vhdx = os.path.join(tmp, "ext4.vhdx")
+            write(vhdx, 3 * MB)
+            found = scan.describe_disks(
+                [("Ubuntu", vhdx), ("-", vhdx), ("docker-desktop", os.path.join(tmp, "missing.vhdx"))], {"Ubuntu"})
+            self.assertEqual(len(found), 1)
+            self.assertEqual((found[0]["distro"], found[0]["size"], found[0]["running"], found[0]["sparse"]),
+                             ("Ubuntu", 3 * MB, "yes", False))
+        finally:
+            shutil.rmtree(tmp)
+
+    @unittest.skipUnless(os.name == "nt", "NTFS sparse files")
+    def test_sparse_disk_is_marked(self):
+        tmp = tempfile.mkdtemp(prefix="disk-sweeper-test-")
+        try:
+            vhdx = os.path.join(tmp, "ext4.vhdx")
+            write(vhdx, 1)
+            subprocess.run(["fsutil", "sparse", "setflag", vhdx], check=True, capture_output=True)
+            self.assertTrue(scan.describe_disks([("Ubuntu", vhdx)], set())[0]["sparse"])
+        finally:
+            shutil.rmtree(tmp)
+
+
 class LinkTargetTest(unittest.TestCase):
     def test_relative_target_is_resolved_from_the_link_folder(self):
         tmp = tempfile.mkdtemp(prefix="disk-sweeper-link-")
@@ -272,6 +304,9 @@ class ClassifyTest(unittest.TestCase):
         "~/.cache/huggingface/hub": "dev",
         "~/.cache/pip": "dev",
         "~/appdata/local/npm-cache": "dev",
+        "~/appdata/local/wsl/{0a1b}/ext4.vhdx": "dev",
+        "~/appdata/local/packages/canonicalgroupltd.ubuntu/localstate/ext4.vhdx": "dev",
+        "d:/wsl/ubuntu/ext4.vhdx": "dev",
         "~/documents/projects/foo": "dev",
         "c:/program files (x86)/windows kits/10": "dev",
         "c:/programdata/package cache": "dev",
