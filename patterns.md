@@ -86,3 +86,20 @@ Tauri や Electron 製アプリは、アプリケーション識別子ごとに�
 - **休止状態ファイル** — Windows の `hiberfil.sys`。デスクトップ環境では休止状態を使わないケースが多く、`powercfg /h off` で領域を完全解放できる。システム起動への影響はなく `powercfg /h on` で復元可能（副作用は高速スタートアップの無効化のみ）。Unix 系は zram や swap を用いるため該当しにくい。
 - **Windows 標準機能** — `WinSxS` のクリーンアップ（`DISM /Online /Cleanup-Image /StartComponentCleanup`、実行後は過去の更新プログラムへのロールバック不可）、`SoftwareDistribution\Download`、配信最適化キャッシュ（`C:\Windows\Installer` は対象外。`exclusions.md` の X2）。
 - **Linux 標準機能** — `journalctl --vacuum-size=` によるログ削除、`paccache -rk1` による旧パッケージキャッシュ削除、不要になった Git worktree の整理（`git worktree prune`）。
+
+## P10. ドライバーの旧版
+
+ドライバーを更新しても、旧版のパッケージはドライバーストアに残る。GPU ドライバーは1版が大きい（実測で NVIDIA の表示ドライバー `nvmdi.inf` が 2.7 GB）。
+
+**判定**: Windows は `digest-system.md` の「Driver packages」の表を使う（`pnputil /enum-drivers` と `/enum-devices` の結果）。`in use` は、接続していない機器も含めて、どれかのデバイスがそのパッケージを使っていれば `yes`。
+
+- **旧版**: `in use` が `no` で、同じ提供元・同じクラスに、`yes` でより新しい版があるもの。GPU ドライバーは、版や製品群で元の名前（original）が違うことがある。同じ提供元の Display クラスなら、元の名前が違っても同じ系統として比べる。
+- **ロールバック用**: 旧版のうち、使用中のものと元の名前が同じで、その次に新しい1版。消すとデバイスマネージャーの「ドライバーを元に戻す」が使えなくなるので、ほかの旧版とは分けて挙げる。
+- **機器がないもの**: `in use` が `no` で、同じ提供元・同じクラスに使用中のものが1つもないもの。接続していない機器でも登録が残っていれば `yes` になるので、ここに入るのは登録ごと消えた機器のもの（取り外した機器、交換した GPU）。その機器をつなぎ直すと、ドライバーの再取得が要る。
+- Printer クラスは見ない。プリンターは印刷スプーラー経由で使われるので、`in use` が当てにならない。
+- **インストーラーの展開残り**: `C:\AMD`、`C:\NVIDIA`、`C:\Intel`。ドライバーのインストーラーが展開したファイルで、インストールが終われば要らない。中身が展開済みのインストーラー（`Setup.exe`、`.inf`、版番号のフォルダ）であることを確かめる。
+- Linux では、`/usr/lib/modules/<版>` のうち、起動中のカーネル（`uname -r`）でもインストール済みのカーネルでもなく、どのパッケージにも属さない（`pacman -Qo` や `dpkg -S` で持ち主がない）ものに読み替える。
+
+**分級**: 旧版・機器がないものは B（管理者権限が要る）、ロールバック用は B で影響を明記、インストーラーの展開残りは A
+**消し方**: `pnputil /delete-driver oemNN.inf` を1件ずつ（管理者）。`/force` と `/uninstall` は付けない（`exclusions.md` の X8）。使用中のものは pnputil が削除を拒否する。
+**実績**: 旧版 2件・1 MB 未満（NVIDIA の音声ドライバー、OS 更新の直後で溜まっていなかった）／ 機器がないもの 172 MB（Intel `lms.inf`）

@@ -4,13 +4,13 @@
 
 `digest-system.md` の全部。主に次のもの。
 
-- Windows: `C:\Windows`、`Windows.old`、各ドライブの `$RECYCLE.BIN`、`hiberfil.sys`、`pagefile.sys`、`System Volume Information`、`AppData\Local\Temp`、`CrashDumps`、WER（エラー報告）
-- Linux / macOS: `/var`（ログ、パッケージのキャッシュ）、`/tmp`、`/boot`、ゴミ箱（`~/.local/share/Trash`、各マウントの `.Trash-<uid>`、`~/.Trash`）
+- Windows: `C:\Windows`、`Windows.old`、各ドライブの `$RECYCLE.BIN`、`hiberfil.sys`、`pagefile.sys`、`System Volume Information`、`AppData\Local\Temp`、`CrashDumps`、WER（エラー報告）、ドライバーストアのパッケージ（digest の「Driver packages」の表）、ドライバーのインストーラーの展開先（`C:\AMD`、`C:\NVIDIA`、`C:\Intel`）
+- Linux / macOS: `/var`（ログ、パッケージのキャッシュ）、`/tmp`、`/boot`、`/usr/lib/modules`、ゴミ箱（`~/.local/share/Trash`、各マウントの `.Trash-<uid>`、`~/.Trash`）
 
 ## 見るパターンと除外
 
-- パターン: P1（ゴミ箱）、P9（システム予約と OS 標準の掃除対象）
-- 除外: X2（`C:\Windows\Installer` など）、X6（`LastGood`）
+- パターン: P1（ゴミ箱）、P9（システム予約と OS 標準の掃除対象）、P10（ドライバーの旧版）
+- 除外: X2（`C:\Windows\Installer` など）、X6（`LastGood`）、X8（ドライバーを無理に消さない）
 
 ## 判定のこつ
 
@@ -20,3 +20,5 @@
 - Temp は、日付の古いものだけを候補にする。使用中のファイルはロックされていて消せない（X4）。
 - `pagefile.sys` は C。`hiberfil.sys` は P9（B）。
 - digest の末尾の「読めなかったフォルダ」に、管理者でないと測れない大きな場所があれば、「確かめられなかったもの」に書く。
+- **ドライバーストアの旧版（P10）は、追加の作業に「ドライバーの整理」があるときだけ挙げる。** インストーラーの展開残り（`C:\AMD` など）はふつうのフォルダなので、いつも挙げる。
+- ドライバーの候補は、パスの欄に公開名（`oemNN.inf`）を書き、根拠の欄に元の名前・版・日付と、比べた使用中の版を書く。根拠の先頭には「旧版」「ロールバック用」「機器がない」のどれかを書く（集計でまとまりを分けるのに使う）。
