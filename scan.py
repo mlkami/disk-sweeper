@@ -5,6 +5,7 @@ Read-only. Standard library only (Python 3.8+). Never follows symlinks or juncti
 
 usage:
     python -I scan.py --out DIR [--root PATH ...] [--min-dir-mb 100] [--min-file-mb 150] [--max-rows 200]
+    python -I scan.py --list-drives     drives and free space only, no scan
 
 Writes to DIR:
     summary.md          drives, elapsed time, totals per role, scan errors
@@ -154,6 +155,37 @@ def default_roots():
     except OSError:
         roots = ["/"]
     return roots or ["/"]
+
+
+def disk_usage(root):
+    try:
+        if hasattr(os, "statvfs"):
+            usage = os.statvfs(root)
+            return usage.f_blocks * usage.f_frsize, usage.f_bavail * usage.f_frsize
+        import shutil
+        du = shutil.disk_usage(root)
+        return du.total, du.free
+    except OSError:
+        return 0, 0
+
+
+def volume_label(root):
+    if not IS_WINDOWS:
+        return ""
+    import ctypes
+    buf = ctypes.create_unicode_buffer(261)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(root, buf, len(buf), None, None, None, None, 0)
+    return buf.value if ok else ""
+
+
+def list_drives(roots):
+    """Drives and free space without scanning, for asking the user which drives to sweep."""
+    lines = ["| drive | label | total | free | free % |", "|---|---|---|---|---|"]
+    for root in roots:
+        total, free = disk_usage(root)
+        pct = f"{100 * free / total:.0f}%" if total else "-"
+        lines.append(f"| `{root}` | {volume_label(root) or '-'} | {fmt_size(total)} | {fmt_size(free)} | {pct} |")
+    return "\n".join(lines)
 
 
 class Scanner:
@@ -503,14 +535,21 @@ def write_outputs(out, sc, drives, elapsed, max_rows, obsolete=()):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out")
     ap.add_argument("--root", action="append", help="scan only these roots (default: every fixed drive)")
+    ap.add_argument("--list-drives", action="store_true", help="print drives and free space, then exit")
     ap.add_argument("--min-dir-mb", type=float, default=100)
     ap.add_argument("--min-file-mb", type=float, default=150)
     ap.add_argument("--max-rows", type=int, default=200)
     ap.add_argument("--home", help=argparse.SUPPRESS)
     ap.add_argument("--no-system-info", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.list_drives:
+        # Volume labels can be non-ASCII; the locale code page (cp932 and so on) garbles them for the agent.
+        sys.stdout.buffer.write((list_drives(args.root or default_roots()) + "\n").encode("utf-8"))
+        return 0
+    if not args.out:
+        ap.error("--out is required")
 
     os.makedirs(args.out, exist_ok=True)
     raw_home = args.home or os.path.expanduser("~")
@@ -523,16 +562,7 @@ def main(argv=None):
         t0 = time.time()
         print(f"[scan] {root}", file=sys.stderr, flush=True)
         scanned = sc.scan_root(root)
-        try:
-            usage = os.statvfs(root) if hasattr(os, "statvfs") else None
-            if usage:
-                total, free = usage.f_blocks * usage.f_frsize, usage.f_bavail * usage.f_frsize
-            else:
-                import shutil
-                du = shutil.disk_usage(root)
-                total, free = du.total, du.free
-        except OSError:
-            total = free = 0
+        total, free = disk_usage(root)
         drives.append((root, total, free, scanned))
         print(f"[scan] {root} done in {time.time() - t0:.0f} s", file=sys.stderr, flush=True)
     elapsed = time.time() - started

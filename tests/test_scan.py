@@ -142,6 +142,23 @@ class AppDataTest(unittest.TestCase):
         self.assertNotIn("current.ext-2.0.0", self.dev_digest)
 
 
+class ListDrivesTest(unittest.TestCase):
+    def test_lists_free_space_without_scanning(self):
+        tmp = tempfile.mkdtemp(prefix="disk-sweeper-test-")
+        try:
+            table = scan.list_drives([tmp])
+            row = table.splitlines()[2]
+            self.assertIn(f"`{tmp}`", row)
+            self.assertRegex(row, r"\| \d+%")
+            self.assertFalse(os.listdir(tmp))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_out_is_required_only_for_a_scan(self):
+        with self.assertRaises(SystemExit):
+            scan.main(["--root", "."])
+
+
 class LinkTargetTest(unittest.TestCase):
     def test_relative_target_is_resolved_from_the_link_folder(self):
         tmp = tempfile.mkdtemp(prefix="disk-sweeper-link-")
