@@ -23,7 +23,7 @@
 - 残骸の中に、ログイン情報やセーブデータらしきもの（`.sav`、`saves`、`profiles`、`Local Storage` など）があれば B。
 - 更新の旧世代（P3）は、同じ系統のファイルが日付順に複数あるかで見る。
 - ブラウザのプロファイル、Cookie、Service Worker、`OptGuideOnDeviceModel` は C（X5）。
-- ゲームの譜面、リプレイ、録画、セーブなど、ユーザーが集めたり作ったりしたものは削除候補にしない。D に入れて「ユーザー資産らしい」と書く。
+- ゲームの譜面、リプレイ、録画、セーブなど、ユーザーが集めたり作ったりしたものは削除候補にしない。「資産」として返す（`output.md` の分類）。
 - digest の「Links not followed」で、リンク先が存在しない（`target exists: no`）ものは報告する。リンクだけを消せば片付く。
 - `processes.json` で起動中のアプリのフォルダは、消すと壊れるおそれがある（X4）。
 - WSL のディストリビューションの置き場（`AppData\Local\Packages\CanonicalGroupLimited...\LocalState` など）が大きいのは、中の `.vhdx` のためである。`.vhdx` は dev 担当が見るので、挙げない。
